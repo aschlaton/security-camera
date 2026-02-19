@@ -19,3 +19,5 @@ wheels/
 .cache/
 people/*
 !people/.gitkeep
+!people/person_template/
+!people/person_template/**

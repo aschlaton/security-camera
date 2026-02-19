@@ -68,6 +68,7 @@ set -a; source .env; set +a
 uv run python -m src.main
 ```
 
+
 Controls:
 - In camera mode: press `q` to quit.
 - In conversation mode: press `q` to end the conversation and return to camera mode.

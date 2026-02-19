@@ -12,7 +12,7 @@ from .client import RealtimeClient
 from .prompts import build_instructions
 
 
-@dataclass(slots=True)
+@dataclass
 class RealtimeSessionRunner:
     realtime_config: RealtimeConfig
     audio_config: AudioConfig

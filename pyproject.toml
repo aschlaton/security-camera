@@ -10,5 +10,6 @@ dependencies = [
     "onnxruntime>=1.24.1",
     "openai>=2.0.0",
     "opencv-python>=4.13.0.92",
+    "python-dotenv>=1.2.1",
     "sounddevice>=0.5.5",
 ]

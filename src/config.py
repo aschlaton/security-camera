@@ -4,6 +4,12 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
+REALTIME_DISABLED = False
+
 
 @dataclass(slots=True)
 class CameraConfig:
@@ -11,17 +17,19 @@ class CameraConfig:
     width: int = 1280
     height: int = 720
     window_name: str = "Security Camera"
-    recognition_every_n_frames: int = 3
+    recognition_every_n_frames: int = 8
+    recognition_max_width: int = 640
 
 
 @dataclass(slots=True)
 class RecognitionConfig:
     people_dir: Path = Path("people")
     cache_path: Path = Path(".cache/face_db.npz")
-    similarity_threshold: float = 0.45
-    required_consecutive_matches: int = 3
+    initial_similarity_threshold: float = 0.50
+    initial_required_frames: int = 3
+    session_similarity_threshold: float = 0.40
+    session_missed_frames: int = 12
     cooldown_seconds: float = 20.0
-    person_absent_timeout_seconds: float = 6.0
 
 
 @dataclass(slots=True)
@@ -35,8 +43,9 @@ class AudioConfig:
 
 @dataclass(slots=True)
 class RealtimeConfig:
+    openai_api_key: str
     model: str = "gpt-realtime"
-    openai_api_key: str | None = None
+    disabled: bool = False
 
 
 @dataclass(slots=True)
@@ -48,10 +57,14 @@ class AppConfig:
 
 
 def load_config() -> AppConfig:
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not REALTIME_DISABLED and not api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY is missing. Put it in .env and load it before running."
+        )
     return AppConfig(
         camera=CameraConfig(),
         recognition=RecognitionConfig(),
         audio=AudioConfig(),
-        realtime=RealtimeConfig(openai_api_key=api_key),
+        realtime=RealtimeConfig(openai_api_key=api_key or "", disabled=REALTIME_DISABLED),
     )

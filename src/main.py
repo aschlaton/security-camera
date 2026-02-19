@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import enum
 import sys
-import time
+
+os.environ.setdefault("MPLBACKEND", "Agg")
 
 import cv2
 
@@ -20,7 +22,11 @@ class AppState(enum.StrEnum):
 
 
 def run() -> int:
-    config = load_config()
+    try:
+        config = load_config()
+    except RuntimeError as exc:
+        print(f"Config error: {exc}", file=sys.stderr)
+        return 1
 
     if not config.recognition.people_dir.exists():
         config.recognition.people_dir.mkdir(parents=True, exist_ok=True)
@@ -43,9 +49,17 @@ def run() -> int:
             file=sys.stderr,
         )
 
-    matcher = FaceMatcher(config.recognition.similarity_threshold)
+    matcher = FaceMatcher(
+        min(
+            config.recognition.initial_similarity_threshold,
+            config.recognition.session_similarity_threshold,
+        )
+    )
     trigger = RecognitionTrigger(
-        required_consecutive_matches=config.recognition.required_consecutive_matches,
+        initial_similarity_threshold=config.recognition.initial_similarity_threshold,
+        initial_required_frames=config.recognition.initial_required_frames,
+        session_similarity_threshold=config.recognition.session_similarity_threshold,
+        session_missed_frames=config.recognition.session_missed_frames,
         cooldown_seconds=config.recognition.cooldown_seconds,
     )
 
@@ -63,11 +77,10 @@ def run() -> int:
     session_runner = RealtimeSessionRunner(config.realtime, config.audio)
     state = AppState.IDLE_CAMERA
     active_person: str | None = None
-    last_seen_active_person = time.monotonic()
     frame_idx = 0
     overlays: list[FaceOverlay] = []
     should_quit = False
-    status_text = "IDLE_CAMERA (press q to quit)"
+    recog_max_w = config.camera.recognition_max_width
 
     cv2.namedWindow(config.camera.window_name, cv2.WINDOW_NORMAL)
     try:
@@ -77,23 +90,29 @@ def run() -> int:
             run_recognition = frame_idx % config.camera.recognition_every_n_frames == 0
 
             if state == AppState.IDLE_CAMERA and run_recognition:
-                overlays, maybe_trigger_name = process_frame(frame, embedder, face_db, matcher)
-                fired_name = trigger.update(maybe_trigger_name)
+                overlays, maybe_trigger_name, maybe_trigger_similarity = process_frame(
+                    frame, embedder, face_db, matcher, recog_max_w
+                )
+                fired_name = trigger.update_idle(maybe_trigger_name, maybe_trigger_similarity)
                 if fired_name is not None:
                     active_person = fired_name
+                    trigger.reset_session_tracking()
                     state = AppState.STARTING_SESSION
             elif state == AppState.IN_CONVERSATION and run_recognition:
-                overlays, maybe_trigger_name = process_frame(frame, embedder, face_db, matcher)
-                if active_person is not None and maybe_trigger_name == active_person:
-                    last_seen_active_person = time.monotonic()
+                overlays, maybe_trigger_name, maybe_trigger_similarity = process_frame(
+                    frame, embedder, face_db, matcher, recog_max_w
+                )
+                if trigger.update_session(active_person, maybe_trigger_name, maybe_trigger_similarity):
+                    state = AppState.ENDING_SESSION
             elif run_recognition:
-                overlays, _ = process_frame(frame, embedder, face_db, matcher)
+                overlays, _, _ = process_frame(frame, embedder, face_db, matcher, recog_max_w)
 
             if state == AppState.STARTING_SESSION:
-                if not config.realtime.openai_api_key:
-                    print("OPENAI_API_KEY is missing; cannot start conversation.", file=sys.stderr)
-                    state = AppState.IDLE_CAMERA
+                if config.realtime.disabled:
+                    if active_person is not None:
+                        trigger.start_cooldown(active_person)
                     active_person = None
+                    state = AppState.IDLE_CAMERA
                 else:
                     try:
                         person_name = active_person or "Guest"
@@ -101,7 +120,6 @@ def run() -> int:
                             person_name,
                             face_db.prompt_for_person(person_name),
                         )
-                        last_seen_active_person = time.monotonic()
                         state = AppState.IN_CONVERSATION
                     except Exception as exc:
                         print(f"Failed to start realtime session: {exc}", file=sys.stderr)
@@ -111,15 +129,12 @@ def run() -> int:
             if state == AppState.IN_CONVERSATION:
                 if not session_runner.is_running:
                     state = AppState.ENDING_SESSION
-                elif active_person is not None:
-                    elapsed_absent = time.monotonic() - last_seen_active_person
-                    if elapsed_absent > config.recognition.person_absent_timeout_seconds:
-                        state = AppState.ENDING_SESSION
 
             if state == AppState.ENDING_SESSION:
                 session_runner.stop()
                 if active_person is not None:
                     trigger.start_cooldown(active_person)
+                trigger.reset_session_tracking()
                 active_person = None
                 state = AppState.IDLE_CAMERA
 
@@ -144,7 +159,10 @@ def run() -> int:
 
 def build_status_text(state: AppState, active_person: str | None, config: AppConfig) -> str:
     if state == AppState.IDLE_CAMERA:
-        return f"{state.value} | threshold={config.recognition.similarity_threshold:.2f} | q:quit"
+        return (
+            f"{state.value} | start>={config.recognition.initial_similarity_threshold:.2f}"
+            f" x{config.recognition.initial_required_frames} | q:quit"
+        )
     if state == AppState.STARTING_SESSION:
         return f"{state.value} | person={active_person or 'unknown'}"
     if state == AppState.IN_CONVERSATION:
@@ -153,12 +171,30 @@ def build_status_text(state: AppState, active_person: str | None, config: AppCon
 
 
 def process_frame(
-    frame,
+    frame: cv2.typing.MatLike,
     embedder: FaceEmbedder,
     face_db: FaceDatabase,
     matcher: FaceMatcher,
-) -> tuple[list[FaceOverlay], str | None]:
-    detections = embedder.detect_faces(frame)
+    recognition_max_width: int = 0,
+) -> tuple[list[FaceOverlay], str | None, float | None]:
+    h, w = frame.shape[:2]
+    if recognition_max_width > 0 and w > recognition_max_width:
+        scale = recognition_max_width / w
+        small_w = recognition_max_width
+        small_h = int(h * scale)
+        recog_frame = cv2.resize(frame, (small_w, small_h))
+        detections = embedder.detect_faces(recog_frame)
+        sx, sy = w / small_w, h / small_h
+
+        def scale_bbox(bbox: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+            x1, y1, x2, y2 = bbox
+            return (int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy))
+    else:
+        detections = embedder.detect_faces(frame)
+
+        def scale_bbox(bbox: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+            return bbox
+
     overlays: list[FaceOverlay] = []
     best_name: str | None = None
     best_score = -1.0
@@ -167,7 +203,7 @@ def process_frame(
         label = result.name if result.is_match and result.name else "Unknown"
         overlays.append(
             FaceOverlay(
-                bbox=detection.bbox,
+                bbox=scale_bbox(detection.bbox),
                 label=label,
                 similarity=result.similarity if result.name else None,
                 is_match=result.is_match,
@@ -176,7 +212,8 @@ def process_frame(
         if result.is_match and result.name and result.similarity > best_score:
             best_score = result.similarity
             best_name = result.name
-    return overlays, best_name
+    best_similarity = best_score if best_name is not None else None
+    return overlays, best_name, best_similarity
 
 
 if __name__ == "__main__":
