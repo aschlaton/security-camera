@@ -161,13 +161,12 @@ def run() -> int:
                         state = AppState.ENDING_SESSION
 
                 if state == AppState.ENDING_SESSION:
-                    logger.info("Voice session ended for {}", active_person or "unknown")
                     session_runner.stop()
-                    if active_person is not None:
-                        trigger.start_cooldown(active_person)
-                    trigger.reset_session_tracking()
-                    active_person = None
-                    state = AppState.IDLE_CAMERA
+                    if not session_runner.is_running:
+                        logger.info("Voice session ended for {}", active_person or "unknown")
+                        trigger.reset_session_tracking()
+                        active_person = None
+                        state = AppState.IDLE_CAMERA
 
                 status_text = build_status_text(state, active_person, config)
                 output = draw_overlays_and_status(frame, overlays, status_text)
@@ -182,7 +181,7 @@ def run() -> int:
         except KeyboardInterrupt:
             should_quit = True
         finally:
-            session_runner.stop()
+            session_runner.stop(wait=True)
             camera.close()
             cv2.destroyAllWindows()
     return 0

@@ -53,6 +53,8 @@ class RealtimeSessionRunner:
         self._stop_event = threading.Event()
         self._done_event = threading.Event()
         self._error: Exception | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._client: RealtimeClient | None = None
 
     @property
     def is_running(self) -> bool:
@@ -75,11 +77,22 @@ class RealtimeSessionRunner:
         )
         self._thread.start()
 
-    def stop(self, join_timeout_seconds: float = 3.0) -> None:
+    def stop(self, wait: bool = False) -> None:
         self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=join_timeout_seconds)
-            self._thread = None
+        loop = self._loop
+        client = self._client
+        if loop is not None and loop.is_running() and client is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(client.close(), loop)
+            except Exception:
+                pass
+        if not wait:
+            return
+        thread = self._thread
+        if thread is not None:
+            thread.join()
+            if self._thread is thread and not thread.is_alive():
+                self._thread = None
 
     def _run_thread(self, person_name: str, person_prompt: str) -> None:
         try:
@@ -88,10 +101,14 @@ class RealtimeSessionRunner:
             self._error = exc
             logger.exception("Voice session failed for {}: {}", person_name, exc)
         finally:
+            if self._thread is threading.current_thread():
+                self._thread = None
             self._done_event.set()
 
     async def _run_session(self, person_name: str, person_prompt: str) -> None:
         client = RealtimeClient(self.realtime_config)
+        self._loop = asyncio.get_running_loop()
+        self._client = client
         audio = AudioIO(
             sample_rate_hz=self.audio_config.sample_rate_hz,
             channels=self.audio_config.channels,
@@ -152,9 +169,11 @@ class RealtimeSessionRunner:
         finally:
             sender_task.cancel()
             receiver_task.cancel()
-            await asyncio.gather(sender_task, receiver_task, return_exceptions=True)
-            audio.stop()
             await client.close()
+            await asyncio.gather(sender_task, return_exceptions=True)
+            audio.stop()
+            self._client = None
+            self._loop = None
 
     async def _wait_for_session_updated(self, client: RealtimeClient, timeout_s: float = 5.0) -> None:
         async def _wait() -> None:
@@ -184,39 +203,49 @@ class RealtimeSessionRunner:
         output_transcripts: dict[str, str] = {}
         block_bytes = self.audio_config.speaker_chunk_frames * self.audio_config.channels * 2
         speaker_buf = bytearray()
-        while not self._stop_event.is_set():
-            event = await client.recv_json()
-            event_type = event.get("type")
-            if event_type in {"response.output_audio.delta", "response.audio.delta"}:
-                e = cast(_AudioDeltaEvent, event)
-                delta = e.get("delta")
-                if delta:
-                    speaker_buf.extend(base64.b64decode(delta))
-                    while len(speaker_buf) >= block_bytes:
-                        audio.queue_speaker_audio(bytes(speaker_buf[:block_bytes]))
-                        del speaker_buf[:block_bytes]
-            elif event_type == "response.output_audio_transcript.delta":
-                e = cast(_TranscriptDeltaEvent, event)
-                item_id = e.get("item_id") or ""
-                output_transcripts[item_id] = output_transcripts.get(item_id, "") + (e.get("delta") or "")
-            elif event_type == "response.done":
-                for text in output_transcripts.values():
-                    if text.strip():
-                        asyncio.create_task(asyncio.to_thread(logger.info, "Response: {}", text.strip()))
-                output_transcripts.clear()
-            elif event_type == "input_audio_buffer.speech_started":
-                await client.send_json({"type": "response.cancel"})
-                audio.clear_speaker()
-                speaker_buf.clear()
-            elif event_type == "conversation.item.added":
-                e = cast(_ItemAddedEvent, event)
-                item: _ConversationItem = e.get("item") or {}
-                role = item.get("role")
-                for part in item.get("content") or []:
-                    transcript = part.get("transcript")
-                    if not transcript:
-                        continue
-                    if role == "user":
-                        asyncio.create_task(asyncio.to_thread(logger.info, "User said: {}", transcript.strip()))
-                    elif role == "assistant":
-                        asyncio.create_task(asyncio.to_thread(logger.info, "Response: {}", transcript.strip()))
+        stop_wait_task = asyncio.create_task(asyncio.to_thread(self._stop_event.wait))
+        try:
+            while True:
+                recv_task = asyncio.create_task(client.recv_json())
+                done, _ = await asyncio.wait(
+                    {recv_task, stop_wait_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if stop_wait_task in done:
+                    recv_task.cancel()
+                    await asyncio.gather(recv_task, return_exceptions=True)
+                    break
+                event = recv_task.result()
+                event_type = event.get("type")
+                if event_type in {"response.output_audio.delta", "response.audio.delta"}:
+                    e = cast(_AudioDeltaEvent, event)
+                    delta = e.get("delta")
+                    if delta:
+                        speaker_buf.extend(base64.b64decode(delta))
+                        while len(speaker_buf) >= block_bytes:
+                            audio.queue_speaker_audio(bytes(speaker_buf[:block_bytes]))
+                            del speaker_buf[:block_bytes]
+                elif event_type == "response.output_audio_transcript.delta":
+                    e = cast(_TranscriptDeltaEvent, event)
+                    item_id = e.get("item_id") or ""
+                    output_transcripts[item_id] = output_transcripts.get(item_id, "") + (e.get("delta") or "")
+                elif event_type == "response.done":
+                    for text in output_transcripts.values():
+                        if text.strip():
+                            asyncio.create_task(asyncio.to_thread(logger.info, "Response: {}", text.strip()))
+                    output_transcripts.clear()
+                elif event_type == "conversation.item.added":
+                    e = cast(_ItemAddedEvent, event)
+                    item: _ConversationItem = e.get("item") or {}
+                    role = item.get("role")
+                    for part in item.get("content") or []:
+                        transcript = part.get("transcript")
+                        if not transcript:
+                            continue
+                        if role == "user":
+                            asyncio.create_task(asyncio.to_thread(logger.info, "User said: {}", transcript.strip()))
+                        elif role == "assistant":
+                            asyncio.create_task(asyncio.to_thread(logger.info, "Response: {}", transcript.strip()))
+        finally:
+            stop_wait_task.cancel()
+            await asyncio.gather(stop_wait_task, return_exceptions=True)

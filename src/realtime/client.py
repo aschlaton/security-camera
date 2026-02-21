@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -44,13 +45,20 @@ class RealtimeClient:
         }
 
     async def close(self) -> None:
-        if self._conn is not None:
-            await self._conn.close()
-            self._conn = None
-            self._events = None
-        if self._conn_manager is not None:
-            await self._conn_manager.__aexit__(None, None, None)
-            self._conn_manager = None
-        if self._sdk is not None:
-            await self._sdk.close()
-            self._sdk = None
+        conn = self._conn
+        conn_manager = self._conn_manager
+        sdk = self._sdk
+        self._conn = None
+        self._events = None
+        self._conn_manager = None
+        self._sdk = None
+
+        if conn is not None:
+            with suppress(Exception):
+                await conn.close()
+        if conn_manager is not None:
+            with suppress(Exception):
+                await conn_manager.__aexit__(None, None, None)
+        if sdk is not None:
+            with suppress(Exception):
+                await sdk.close()
