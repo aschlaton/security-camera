@@ -49,6 +49,8 @@ def run() -> int:
         )
 
     embedder = FaceEmbedder()
+    people_dir = config.recognition.people_dir.resolve()
+    instructions_by_person = load_person_instructions(people_dir)
     face_db = FaceDatabase.load_or_build(
         people_dir=config.recognition.people_dir,
         cache_path=config.recognition.cache_path,
@@ -60,6 +62,15 @@ def run() -> int:
             "Recognition will run, but no one can match until faces are added.",
             file=sys.stderr,
         )
+    else:
+        for name in set(face_db.names):
+            prompt = (instructions_by_person.get(str(name)) or "").strip()
+            if not prompt:
+                print(
+                    f"Missing or empty people/{name}/prompt.md. Every person must have instructions.",
+                    file=sys.stderr,
+                )
+                return 1
 
     matcher = FaceMatcher(
         min(
@@ -137,10 +148,8 @@ def run() -> int:
                         try:
                             person_name = active_person or "unknown"
                             logger.info("Voice session started for {}", person_name)
-                            session_runner.start(
-                                person_name,
-                                face_db.prompt_for_person(person_name),
-                            )
+                            person_prompt = instructions_by_person[person_name]
+                            session_runner.start(person_name, person_prompt)
                             state = AppState.IN_CONVERSATION
                         except Exception as exc:
                             print(f"Failed to start realtime session: {exc}", file=sys.stderr)
@@ -190,6 +199,20 @@ def build_status_text(state: AppState, active_person: str | None, config: AppCon
     if state == AppState.IN_CONVERSATION:
         return f"{state.value} | person={active_person or 'unknown'} | q:end conversation"
     return f"{state.value}"
+
+
+def load_person_instructions(people_dir: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for person_path in people_dir.iterdir():
+        if not person_path.is_dir():
+            continue
+        prompt_path = person_path / "prompt.md"
+        if not prompt_path.exists():
+            continue
+        text = prompt_path.read_text(encoding="utf-8").strip()
+        if text:
+            out[person_path.name] = text
+    return out
 
 
 def process_frame(

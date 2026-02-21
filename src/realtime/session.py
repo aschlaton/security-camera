@@ -12,7 +12,6 @@ from src.config import AudioConfig, RealtimeConfig
 
 from .audio_io import AudioIO
 from .client import RealtimeClient
-from .prompts import build_instructions
 
 
 class _AudioDeltaEvent(TypedDict, total=False):
@@ -40,6 +39,10 @@ class _ItemAddedEvent(TypedDict, total=False):
     item: _ConversationItem
 
 
+class _Event(TypedDict, total=False):
+    type: str
+
+
 @dataclass
 class RealtimeSessionRunner:
     realtime_config: RealtimeConfig
@@ -59,7 +62,7 @@ class RealtimeSessionRunner:
     def error(self) -> Exception | None:
         return self._error
 
-    def start(self, person_name: str, person_prompt: str | None = None) -> None:
+    def start(self, person_name: str, person_prompt: str) -> None:
         if self.is_running:
             raise RuntimeError("Realtime session is already running")
         self._stop_event.clear()
@@ -78,7 +81,7 @@ class RealtimeSessionRunner:
             self._thread.join(timeout=join_timeout_seconds)
             self._thread = None
 
-    def _run_thread(self, person_name: str, person_prompt: str | None) -> None:
+    def _run_thread(self, person_name: str, person_prompt: str) -> None:
         try:
             asyncio.run(self._run_session(person_name, person_prompt))
         except Exception as exc:
@@ -87,7 +90,7 @@ class RealtimeSessionRunner:
         finally:
             self._done_event.set()
 
-    async def _run_session(self, person_name: str, person_prompt: str | None) -> None:
+    async def _run_session(self, person_name: str, person_prompt: str) -> None:
         client = RealtimeClient(self.realtime_config)
         audio = AudioIO(
             sample_rate_hz=self.audio_config.sample_rate_hz,
@@ -98,37 +101,51 @@ class RealtimeSessionRunner:
             speaker_queue_max_chunks=self.audio_config.speaker_queue_max_chunks,
         )
         await client.connect()
+        instructions = person_prompt.strip().replace("{person_name}", person_name)
+        logger.info("System prompt sent for {}:\n{}", person_name, instructions)
         await client.send_json(
             {
                 "type": "session.update",
                 "session": {
                     "type": "realtime",
                     "model": self.realtime_config.model,
-                    "instructions": build_instructions(person_name, person_prompt),
-                    "input_audio_format": "pcm16",
-                    "output_audio_format": "pcm16",
-                    "voice": self.realtime_config.voice,
-                    "speed": self.realtime_config.speed,
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": self.realtime_config.vad_threshold,
-                        "silence_duration_ms": self.realtime_config.vad_silence_duration_ms,
-                        "prefix_padding_ms": self.realtime_config.vad_prefix_padding_ms,
+                    "instructions": instructions,
+                    "audio": {
+                        "input": {
+                            "format": {
+                                "type": "audio/pcm",
+                                "rate": self.audio_config.sample_rate_hz,
+                            },
+                            "turn_detection": {
+                                "type": "server_vad",
+                                "threshold": self.realtime_config.vad_threshold,
+                                "silence_duration_ms": self.realtime_config.vad_silence_duration_ms,
+                                "prefix_padding_ms": self.realtime_config.vad_prefix_padding_ms,
+                                "interrupt_response": True,
+                            },
+                        },
+                        "output": {
+                            "format": {
+                                "type": "audio/pcm",
+                                "rate": self.audio_config.sample_rate_hz,
+                            },
+                            "voice": self.realtime_config.voice,
+                            "speed": self.realtime_config.speed,
+                        },
                     },
                 },
             }
         )
-        await client.send_json(
-            {
-                "type": "response.create",
-                "response": {
-                    "instructions": f"Start with a short greeting to {person_name}.",
-                },
-            }
-        )
+        await self._wait_for_session_updated(client)
         audio.start()
         sender_task = asyncio.create_task(self._send_mic_audio(client, audio))
         receiver_task = asyncio.create_task(self._recv_audio(client, audio))
+        await client.send_json(
+            {
+                "type": "response.create",
+                "response": {},
+            }
+        )
         try:
             while not self._stop_event.is_set():
                 await asyncio.sleep(0.05)
@@ -138,6 +155,18 @@ class RealtimeSessionRunner:
             await asyncio.gather(sender_task, receiver_task, return_exceptions=True)
             audio.stop()
             await client.close()
+
+    async def _wait_for_session_updated(self, client: RealtimeClient, timeout_s: float = 5.0) -> None:
+        async def _wait() -> None:
+            while True:
+                event = cast(_Event, await client.recv_json())
+                event_type = event.get("type")
+                if event_type == "session.updated":
+                    return
+                if event_type == "error":
+                    raise RuntimeError(f"Realtime error before session.updated: {event}")
+
+        await asyncio.wait_for(_wait(), timeout=timeout_s)
 
     async def _send_mic_audio(self, client: RealtimeClient, audio: AudioIO) -> None:
         while not self._stop_event.is_set():
@@ -175,6 +204,10 @@ class RealtimeSessionRunner:
                     if text.strip():
                         asyncio.create_task(asyncio.to_thread(logger.info, "Response: {}", text.strip()))
                 output_transcripts.clear()
+            elif event_type == "input_audio_buffer.speech_started":
+                await client.send_json({"type": "response.cancel"})
+                audio.clear_speaker()
+                speaker_buf.clear()
             elif event_type == "conversation.item.added":
                 e = cast(_ItemAddedEvent, event)
                 item: _ConversationItem = e.get("item") or {}

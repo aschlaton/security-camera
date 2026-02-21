@@ -8,8 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-REALTIME_DISABLED = False
-
+REALTIME_DISABLED = False #for testing face recognition
 
 @dataclass(slots=True)
 class CameraConfig:
@@ -50,7 +49,7 @@ class RealtimeConfig:
     voice: str = "marin"
     speed: float = 1.25
     vad_threshold: float = 0.4
-    vad_silence_duration_ms: int = 700
+    vad_silence_duration_ms: int = 600
     vad_prefix_padding_ms: int = 300
 
 

@@ -9,7 +9,7 @@ from .embedder import FaceEmbedder
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-PROMPT_FILENAMES = ("prompt.txt", "prompt.md", "instructions.txt")
+PROMPT_FILENAMES = ("prompt.md",)
 
 
 @dataclass(slots=True)
@@ -42,6 +42,11 @@ class FaceDatabase:
         cache_path: Path,
         embedder: FaceEmbedder,
     ) -> FaceDatabase:
+        if not people_dir.is_absolute():
+            _project_root = Path(__file__).resolve().parent.parent.parent
+            people_dir = (_project_root / people_dir).resolve()
+        else:
+            people_dir = people_dir.resolve()
         people_dir.mkdir(parents=True, exist_ok=True)
         image_paths, prompts = _collect_face_assets(people_dir)
         if image_paths and cache_path.exists() and _cache_is_fresh(cache_path, image_paths):
@@ -68,7 +73,15 @@ class FaceDatabase:
 def _cache_is_fresh(cache_path: Path, image_paths: list[Path]) -> bool:
     cache_mtime = cache_path.stat().st_mtime
     latest_face_mtime = max(path.stat().st_mtime for path in image_paths)
-    return cache_mtime >= latest_face_mtime
+    if cache_mtime < latest_face_mtime:
+        return False
+    try:
+        data = np.load(cache_path, allow_pickle=False)
+        cached_sources = {str(Path(src).resolve()) for src in data["sources"]}
+    except Exception:
+        return False
+    current_sources = {str(path.resolve()) for path in image_paths}
+    return cached_sources == current_sources
 
 
 def _load_cache(cache_path: Path) -> list[FaceDBEntry] | None:

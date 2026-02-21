@@ -65,6 +65,13 @@ class AudioIO:
         except queue.Full:
             pass
 
+    def clear_speaker(self) -> None:
+        while not self._speaker_queue.empty():
+            try:
+                self._speaker_queue.get_nowait()
+            except queue.Empty:
+                break
+
     def _on_mic_chunk(self, indata: bytes, frames: int, time_info: dict, status: sd.CallbackFlags) -> None:
         _ = frames, time_info, status
         try:
