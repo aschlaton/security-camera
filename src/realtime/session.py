@@ -93,6 +93,7 @@ class RealtimeSessionRunner:
             sample_rate_hz=self.audio_config.sample_rate_hz,
             channels=self.audio_config.channels,
             chunk_frames=self.audio_config.chunk_frames,
+            speaker_chunk_frames=self.audio_config.speaker_chunk_frames,
             mic_queue_max_chunks=self.audio_config.mic_queue_max_chunks,
             speaker_queue_max_chunks=self.audio_config.speaker_queue_max_chunks,
         )
@@ -106,12 +107,14 @@ class RealtimeSessionRunner:
                     "instructions": build_instructions(person_name, person_prompt),
                     "input_audio_format": "pcm16",
                     "output_audio_format": "pcm16",
+                    "voice": self.realtime_config.voice,
+                    "speed": self.realtime_config.speed,
                     "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": self.realtime_config.vad_threshold,
-                    "silence_duration_ms": self.realtime_config.vad_silence_duration_ms,
-                    "prefix_padding_ms": self.realtime_config.vad_prefix_padding_ms,
-                },
+                        "type": "server_vad",
+                        "threshold": self.realtime_config.vad_threshold,
+                        "silence_duration_ms": self.realtime_config.vad_silence_duration_ms,
+                        "prefix_padding_ms": self.realtime_config.vad_prefix_padding_ms,
+                    },
                 },
             }
         )
@@ -150,6 +153,8 @@ class RealtimeSessionRunner:
 
     async def _recv_audio(self, client: RealtimeClient, audio: AudioIO) -> None:
         output_transcripts: dict[str, str] = {}
+        block_bytes = self.audio_config.speaker_chunk_frames * self.audio_config.channels * 2
+        speaker_buf = bytearray()
         while not self._stop_event.is_set():
             event = await client.recv_json()
             event_type = event.get("type")
@@ -157,7 +162,10 @@ class RealtimeSessionRunner:
                 e = cast(_AudioDeltaEvent, event)
                 delta = e.get("delta")
                 if delta:
-                    audio.queue_speaker_audio(base64.b64decode(delta))
+                    speaker_buf.extend(base64.b64decode(delta))
+                    while len(speaker_buf) >= block_bytes:
+                        audio.queue_speaker_audio(bytes(speaker_buf[:block_bytes]))
+                        del speaker_buf[:block_bytes]
             elif event_type == "response.output_audio_transcript.delta":
                 e = cast(_TranscriptDeltaEvent, event)
                 item_id = e.get("item_id") or ""
@@ -165,7 +173,7 @@ class RealtimeSessionRunner:
             elif event_type == "response.done":
                 for text in output_transcripts.values():
                     if text.strip():
-                        logger.info("Response: {}", text.strip())
+                        asyncio.create_task(asyncio.to_thread(logger.info, "Response: {}", text.strip()))
                 output_transcripts.clear()
             elif event_type == "conversation.item.added":
                 e = cast(_ItemAddedEvent, event)
@@ -176,6 +184,6 @@ class RealtimeSessionRunner:
                     if not transcript:
                         continue
                     if role == "user":
-                        logger.info("User said: {}", transcript.strip())
+                        asyncio.create_task(asyncio.to_thread(logger.info, "User said: {}", transcript.strip()))
                     elif role == "assistant":
-                        logger.info("Response: {}", transcript.strip())
+                        asyncio.create_task(asyncio.to_thread(logger.info, "Response: {}", transcript.strip()))

@@ -34,9 +34,10 @@ class RecognitionConfig:
 
 @dataclass(slots=True)
 class AudioConfig:
-    sample_rate_hz: int = 16000
+    sample_rate_hz: int = 24000
     channels: int = 1
     chunk_frames: int = 1024
+    speaker_chunk_frames: int = 2048
     mic_queue_max_chunks: int = 64
     speaker_queue_max_chunks: int = 256
 
@@ -46,9 +47,11 @@ class RealtimeConfig:
     openai_api_key: str
     model: str = "gpt-realtime"
     disabled: bool = False
-    vad_threshold: float = 0.4 # higher = more sensitive
-    vad_silence_duration_ms: int = 700 # how long silence before turn ends
-    vad_prefix_padding_ms: int = 300 # how much audio to keep before detected speech
+    voice: str = "marin"
+    speed: float = 1.25
+    vad_threshold: float = 0.4
+    vad_silence_duration_ms: int = 700
+    vad_prefix_padding_ms: int = 300
 
 
 @dataclass(slots=True)

@@ -11,12 +11,14 @@ class AudioIO:
         sample_rate_hz: int,
         channels: int,
         chunk_frames: int,
+        speaker_chunk_frames: int,
         mic_queue_max_chunks: int,
         speaker_queue_max_chunks: int,
     ) -> None:
         self._sample_rate_hz = sample_rate_hz
         self._channels = channels
         self._chunk_frames = chunk_frames
+        self._speaker_chunk_frames = speaker_chunk_frames
         self._mic_queue: queue.Queue[bytes] = queue.Queue(maxsize=mic_queue_max_chunks)
         self._speaker_queue: queue.Queue[bytes] = queue.Queue(maxsize=speaker_queue_max_chunks)
         self._mic_stream: sd.RawInputStream | None = None
@@ -34,7 +36,7 @@ class AudioIO:
             samplerate=self._sample_rate_hz,
             channels=self._channels,
             dtype="int16",
-            blocksize=self._chunk_frames,
+            blocksize=self._speaker_chunk_frames,
             callback=self._on_speaker_chunk,
         )
         self._mic_stream.start()
