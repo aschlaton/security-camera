@@ -17,7 +17,10 @@ wheels/
 
 # Local runtime data
 .cache/
+logs/
 people/*
 !people/.gitkeep
-!people/person_template/
-!people/person_template/**
+!people/template/
+!people/template/**
+!people/unknown/
+!people/unknown/**

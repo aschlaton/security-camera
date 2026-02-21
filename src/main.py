@@ -3,15 +3,19 @@ from __future__ import annotations
 import os
 import enum
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 import cv2
+from loguru import logger
 
 from src.config import AppConfig, load_config
 from src.realtime import RealtimeSessionRunner
 from src.recognition import FaceDatabase, FaceEmbedder, FaceMatcher, RecognitionTrigger
-from src.vision import CameraError, CameraStream, FaceOverlay, draw_overlays, draw_status
+from src.vision import CameraError, CameraStream, FaceOverlay, draw_overlays_and_status
 
 
 class AppState(enum.StrEnum):
@@ -27,6 +31,14 @@ def run() -> int:
     except RuntimeError as exc:
         print(f"Config error: {exc}", file=sys.stderr)
         return 1
+
+    logs_dir = Path("logs") / datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    logger.add(
+        logs_dir / "replies.log",
+        filter=lambda r: "User said" in r["message"] or r["message"].startswith("Response"),
+        level="INFO",
+    )
 
     if not config.recognition.people_dir.exists():
         config.recognition.people_dir.mkdir(parents=True, exist_ok=True)
@@ -81,79 +93,89 @@ def run() -> int:
     overlays: list[FaceOverlay] = []
     should_quit = False
     recog_max_w = config.camera.recognition_max_width
+    recog_every = config.camera.recognition_every_n_frames
+    window_name = config.camera.window_name
+    recog_future = None
 
-    cv2.namedWindow(config.camera.window_name, cv2.WINDOW_NORMAL)
-    try:
-        while not should_quit:
-            frame = camera.read()
-            frame_idx += 1
-            run_recognition = frame_idx % config.camera.recognition_every_n_frames == 0
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    with ThreadPoolExecutor(max_workers=1) as recog_executor:
+        try:
+            while not should_quit:
+                frame = camera.read()
+                frame_idx += 1
+                run_recognition = frame_idx % recog_every == 0
 
-            if state == AppState.IDLE_CAMERA and run_recognition:
-                overlays, maybe_trigger_name, maybe_trigger_similarity = process_frame(
-                    frame, embedder, face_db, matcher, recog_max_w
-                )
-                fired_name = trigger.update_idle(maybe_trigger_name, maybe_trigger_similarity)
-                if fired_name is not None:
-                    active_person = fired_name
-                    trigger.reset_session_tracking()
-                    state = AppState.STARTING_SESSION
-            elif state == AppState.IN_CONVERSATION and run_recognition:
-                overlays, maybe_trigger_name, maybe_trigger_similarity = process_frame(
-                    frame, embedder, face_db, matcher, recog_max_w
-                )
-                if trigger.update_session(active_person, maybe_trigger_name, maybe_trigger_similarity):
-                    state = AppState.ENDING_SESSION
-            elif run_recognition:
-                overlays, _, _ = process_frame(frame, embedder, face_db, matcher, recog_max_w)
+                if recog_future is not None and recog_future.done():
+                    try:
+                        overlays, maybe_trigger_name, maybe_trigger_similarity = recog_future.result()
+                        if state == AppState.IDLE_CAMERA:
+                            fired_name = trigger.update_idle(maybe_trigger_name, maybe_trigger_similarity)
+                            if fired_name is not None:
+                                logger.info("Identified: {}", fired_name)
+                                active_person = fired_name
+                                trigger.reset_session_tracking()
+                                state = AppState.STARTING_SESSION
+                        elif state == AppState.IN_CONVERSATION:
+                            if trigger.update_session(active_person, maybe_trigger_name, maybe_trigger_similarity):
+                                state = AppState.ENDING_SESSION
+                    except Exception:
+                        pass
+                    recog_future = None
 
-            if state == AppState.STARTING_SESSION:
-                if config.realtime.disabled:
+                if run_recognition and recog_future is None and state in (AppState.IDLE_CAMERA, AppState.IN_CONVERSATION):
+                    recog_future = recog_executor.submit(
+                        process_frame, frame.copy(), embedder, face_db, matcher, recog_max_w
+                    )
+
+                if state == AppState.STARTING_SESSION:
+                    if config.realtime.disabled:
+                        if active_person is not None:
+                            trigger.start_cooldown(active_person)
+                        active_person = None
+                        state = AppState.IDLE_CAMERA
+                    else:
+                        try:
+                            person_name = active_person or "unknown"
+                            logger.info("Voice session started for {}", person_name)
+                            session_runner.start(
+                                person_name,
+                                face_db.prompt_for_person(person_name),
+                            )
+                            state = AppState.IN_CONVERSATION
+                        except Exception as exc:
+                            print(f"Failed to start realtime session: {exc}", file=sys.stderr)
+                            state = AppState.IDLE_CAMERA
+                            active_person = None
+
+                if state == AppState.IN_CONVERSATION:
+                    if not session_runner.is_running:
+                        state = AppState.ENDING_SESSION
+
+                if state == AppState.ENDING_SESSION:
+                    logger.info("Voice session ended for {}", active_person or "unknown")
+                    session_runner.stop()
                     if active_person is not None:
                         trigger.start_cooldown(active_person)
+                    trigger.reset_session_tracking()
                     active_person = None
                     state = AppState.IDLE_CAMERA
-                else:
-                    try:
-                        person_name = active_person or "Guest"
-                        session_runner.start(
-                            person_name,
-                            face_db.prompt_for_person(person_name),
-                        )
-                        state = AppState.IN_CONVERSATION
-                    except Exception as exc:
-                        print(f"Failed to start realtime session: {exc}", file=sys.stderr)
-                        state = AppState.IDLE_CAMERA
-                        active_person = None
 
-            if state == AppState.IN_CONVERSATION:
-                if not session_runner.is_running:
-                    state = AppState.ENDING_SESSION
+                status_text = build_status_text(state, active_person, config)
+                output = draw_overlays_and_status(frame, overlays, status_text)
+                cv2.imshow(window_name, output)
 
-            if state == AppState.ENDING_SESSION:
-                session_runner.stop()
-                if active_person is not None:
-                    trigger.start_cooldown(active_person)
-                trigger.reset_session_tracking()
-                active_person = None
-                state = AppState.IDLE_CAMERA
-
-            status_text = build_status_text(state, active_person, config)
-            output = draw_status(draw_overlays(frame, overlays), status_text)
-            cv2.imshow(config.camera.window_name, output)
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                if state == AppState.IN_CONVERSATION:
-                    state = AppState.ENDING_SESSION
-                else:
-                    should_quit = True
-    except KeyboardInterrupt:
-        should_quit = True
-    finally:
-        session_runner.stop()
-        camera.close()
-        cv2.destroyAllWindows()
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    if state == AppState.IN_CONVERSATION:
+                        state = AppState.ENDING_SESSION
+                    else:
+                        should_quit = True
+        except KeyboardInterrupt:
+            should_quit = True
+        finally:
+            session_runner.stop()
+            camera.close()
+            cv2.destroyAllWindows()
     return 0
 
 
@@ -182,7 +204,7 @@ def process_frame(
         scale = recognition_max_width / w
         small_w = recognition_max_width
         small_h = int(h * scale)
-        recog_frame = cv2.resize(frame, (small_w, small_h))
+        recog_frame = cv2.resize(frame, (small_w, small_h), interpolation=cv2.INTER_NEAREST)
         detections = embedder.detect_faces(recog_frame)
         sx, sy = w / small_w, h / small_h
 
@@ -195,11 +217,16 @@ def process_frame(
         def scale_bbox(bbox: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
             return bbox
 
-    overlays: list[FaceOverlay] = []
-    best_name: str | None = None
+    if not detections:
+        return [], None, None
+
+    embeddings = [d.embedding for d in detections]
+    results = matcher.match_batch(embeddings, face_db)
+
+    overlays = []
+    best_name = None
     best_score = -1.0
-    for detection in detections:
-        result = matcher.match(detection.embedding, face_db)
+    for detection, result in zip(detections, results, strict=True):
         label = result.name if result.is_match and result.name else "Unknown"
         overlays.append(
             FaceOverlay(
@@ -212,8 +239,7 @@ def process_frame(
         if result.is_match and result.name and result.similarity > best_score:
             best_score = result.similarity
             best_name = result.name
-    best_similarity = best_score if best_name is not None else None
-    return overlays, best_name, best_similarity
+    return overlays, best_name, best_score if best_name is not None else None
 
 
 if __name__ == "__main__":

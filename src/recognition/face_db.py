@@ -24,7 +24,9 @@ class FaceDatabase:
         self.entries = entries
         self.person_prompts = person_prompts or {}
         self.names = np.asarray([entry.name for entry in entries], dtype=np.str_)
-        self.embeddings = np.asarray([entry.embedding for entry in entries], dtype=np.float32)
+        self.embeddings = np.ascontiguousarray(
+            np.asarray([entry.embedding for entry in entries], dtype=np.float32)
+        )
 
     @property
     def is_empty(self) -> bool:

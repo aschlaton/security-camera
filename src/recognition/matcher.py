@@ -28,3 +28,19 @@ class FaceMatcher:
         score = float(scores[index])
         name = str(face_db.names[index])
         return MatchResult(name=name, similarity=score, is_match=score >= self._threshold)
+
+    def match_batch(self, embeddings: np.ndarray, face_db: FaceDatabase) -> list[MatchResult]:
+        if face_db.is_empty or len(embeddings) == 0:
+            return [MatchResult(name=None, similarity=0.0, is_match=False)] * len(embeddings)
+        vectors = np.asarray(embeddings, dtype=np.float32)
+        if vectors.ndim == 1:
+            vectors = vectors.reshape(1, -1)
+        scores = face_db.embeddings @ vectors.T
+        indices = np.argmax(scores, axis=0)
+        out: list[MatchResult] = []
+        for i in range(vectors.shape[0]):
+            idx = int(indices[i])
+            score = float(scores[idx, i])
+            name = str(face_db.names[idx])
+            out.append(MatchResult(name=name, similarity=score, is_match=score >= self._threshold))
+        return out
