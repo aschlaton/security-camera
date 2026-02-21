@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
+import onnxruntime as ort
 from insightface.app import FaceAnalysis
+from loguru import logger
 
 
 @dataclass(slots=True)
@@ -15,7 +18,9 @@ class DetectedFace:
 
 class FaceEmbedder:
     def __init__(self) -> None:
-        self._app = FaceAnalysis(providers=["CPUExecutionProvider"])
+        providers = _select_onnx_providers()
+        logger.info("Face embedder ONNX providers: {}", providers)
+        self._app = FaceAnalysis(providers=providers)
         self._app.prepare(ctx_id=-1)
 
     def detect_faces(self, frame_bgr: np.ndarray) -> list[DetectedFace]:
@@ -37,3 +42,29 @@ class FaceEmbedder:
         if not faces:
             return None
         return faces[0].embedding
+
+
+def _select_onnx_providers() -> list[str]:
+    available = set(ort.get_available_providers())
+    preferred_env = os.environ.get("FACE_ONNX_PROVIDERS", "").strip()
+    if preferred_env:
+        requested = [p.strip() for p in preferred_env.split(",") if p.strip()]
+        selected = [p for p in requested if p in available]
+        if selected:
+            if "CPUExecutionProvider" in available and "CPUExecutionProvider" not in selected:
+                selected.append("CPUExecutionProvider")
+            return selected
+
+    preferred_order = [
+        "CoreMLExecutionProvider",
+        "CUDAExecutionProvider",
+        "DmlExecutionProvider",
+        "OpenVINOExecutionProvider",
+        "CPUExecutionProvider",
+    ]
+    selected = [p for p in preferred_order if p in available]
+    if not selected:
+        return ["CPUExecutionProvider"]
+    if "CPUExecutionProvider" in available and "CPUExecutionProvider" not in selected:
+        selected.append("CPUExecutionProvider")
+    return selected

@@ -21,6 +21,7 @@ class AudioIO:
         self._speaker_chunk_frames = speaker_chunk_frames
         self._mic_queue: queue.Queue[bytes] = queue.Queue(maxsize=mic_queue_max_chunks)
         self._speaker_queue: queue.Queue[bytes] = queue.Queue(maxsize=speaker_queue_max_chunks)
+        self._speaker_pending = bytearray()
         self._mic_stream: sd.RawInputStream | None = None
         self._speaker_stream: sd.RawOutputStream | None = None
 
@@ -71,6 +72,7 @@ class AudioIO:
                 self._speaker_queue.get_nowait()
             except queue.Empty:
                 break
+        self._speaker_pending.clear()
 
     def _on_mic_chunk(self, indata: bytes, frames: int, time_info: dict, status: sd.CallbackFlags) -> None:
         _ = frames, time_info, status
@@ -82,15 +84,18 @@ class AudioIO:
     def _on_speaker_chunk(self, outdata: bytearray, frames: int, time_info: dict, status: sd.CallbackFlags) -> None:
         _ = time_info, status
         expected = frames * self._channels * 2
-        data = b""
-        while len(data) < expected:
+        while len(self._speaker_pending) < expected:
             try:
-                data += self._speaker_queue.get_nowait()
+                self._speaker_pending.extend(self._speaker_queue.get_nowait())
             except queue.Empty:
                 break
-        if len(data) < expected:
-            data += b"\x00" * (expected - len(data))
-        outdata[:] = data[:expected]
+        if len(self._speaker_pending) >= expected:
+            outdata[:] = self._speaker_pending[:expected]
+            del self._speaker_pending[:expected]
+            return
+        outdata[: len(self._speaker_pending)] = self._speaker_pending
+        outdata[len(self._speaker_pending) :] = b"\x00" * (expected - len(self._speaker_pending))
+        self._speaker_pending.clear()
 
     def _clear_queues(self) -> None:
         while not self._mic_queue.empty():

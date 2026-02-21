@@ -24,10 +24,10 @@ def main() -> int:
 
     person_dir.mkdir(parents=True)
     pictures_dir.mkdir()
-    (person_dir / "prompt.txt").write_text("")
+    (person_dir / "prompt.md").write_text("")
 
-    print(f"Created {person_dir}/, {pictures_dir}/, and people/{name}/prompt.txt")
-    print(f"Add face images in people/{name}/pictures/ and edit people/{name}/prompt.txt")
+    print(f"Created {person_dir}/, {pictures_dir}/, and people/{name}/prompt.md")
+    print(f"Add face images in people/{name}/pictures/ and edit people/{name}/prompt.md")
     return 0
 
 

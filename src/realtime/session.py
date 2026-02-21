@@ -79,13 +79,6 @@ class RealtimeSessionRunner:
 
     def stop(self, wait: bool = False) -> None:
         self._stop_event.set()
-        loop = self._loop
-        client = self._client
-        if loop is not None and loop.is_running() and client is not None:
-            try:
-                asyncio.run_coroutine_threadsafe(client.close(), loop)
-            except Exception:
-                pass
         if not wait:
             return
         thread = self._thread
@@ -154,6 +147,8 @@ class RealtimeSessionRunner:
             }
         )
         await self._wait_for_session_updated(client)
+        if self._stop_event.is_set():
+            return
         audio.start()
         sender_task = asyncio.create_task(self._send_mic_audio(client, audio))
         receiver_task = asyncio.create_task(self._recv_audio(client, audio))
@@ -169,8 +164,8 @@ class RealtimeSessionRunner:
         finally:
             sender_task.cancel()
             receiver_task.cancel()
+            await asyncio.gather(sender_task, receiver_task, return_exceptions=True)
             await client.close()
-            await asyncio.gather(sender_task, return_exceptions=True)
             audio.stop()
             self._client = None
             self._loop = None
@@ -178,6 +173,8 @@ class RealtimeSessionRunner:
     async def _wait_for_session_updated(self, client: RealtimeClient, timeout_s: float = 5.0) -> None:
         async def _wait() -> None:
             while True:
+                if self._stop_event.is_set():
+                    return
                 event = cast(_Event, await client.recv_json())
                 event_type = event.get("type")
                 if event_type == "session.updated":

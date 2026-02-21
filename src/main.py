@@ -129,8 +129,8 @@ def run() -> int:
                         elif state == AppState.IN_CONVERSATION:
                             if trigger.update_session(active_person, maybe_trigger_name, maybe_trigger_similarity):
                                 state = AppState.ENDING_SESSION
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.exception("Recognition pipeline failed while processing frame: {}", exc)
                     recog_future = None
 
                 if run_recognition and recog_future is None and state in (AppState.IDLE_CAMERA, AppState.IN_CONVERSATION):

@@ -38,20 +38,17 @@ people/
     pictures/
       1.jpg
       2.jpg
-    prompt.txt
+    prompt.md
   bob/
     pictures/
       face.png
-    instructions.txt
+    prompt.md
 ```
 
 Rules:
 - each person is a folder under `people/`
 - add one or more images under `people/<person>/pictures/`
-- optional per-person prompt file in `people/<person>/`:
-  - `prompt.txt`
-  - `prompt.md`
-  - `instructions.txt`
+- required per-person prompt file in `people/<person>/prompt.md`
 - if a person has only one image, that also works as `people/<person>/single.jpg`
 
 When recognized, the person prompt (if present) is appended to the base realtime instructions.
