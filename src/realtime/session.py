@@ -126,6 +126,7 @@ class RealtimeSessionRunner:
                                 "type": "audio/pcm",
                                 "rate": self.audio_config.sample_rate_hz,
                             },
+                            "noise_reduction": {"type": "far_field"},
                             "turn_detection": {
                                 "type": "server_vad",
                                 "threshold": self.realtime_config.vad_threshold,
@@ -227,6 +228,9 @@ class RealtimeSessionRunner:
                     item_id = e.get("item_id") or ""
                     output_transcripts[item_id] = output_transcripts.get(item_id, "") + (e.get("delta") or "")
                 elif event_type == "response.done":
+                    if (event.get("response") or {}).get("status") == "cancelled":
+                        audio.clear_speaker()
+                        speaker_buf.clear()
                     for text in output_transcripts.values():
                         if text.strip():
                             asyncio.create_task(asyncio.to_thread(logger.info, "Response: {}", text.strip()))
